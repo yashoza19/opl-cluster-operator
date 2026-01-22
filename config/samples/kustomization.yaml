@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- opl_v1alpha1_clusterrequest.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
