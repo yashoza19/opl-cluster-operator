@@ -18,19 +18,49 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	oplv1alpha1 "github.com/openshift-partner-labs/opl-cluster-operator/api/v1alpha1"
+)
+
+const (
+	clusterRequestFinalizer = "opl.openshiftpartnerlabs.com/finalizer"
+
+	// State constants
+	StatePending       = "pending"
+	StateApproved      = "approved"
+	StateGitCommitted  = "git-committed"
+	StateProvisioning  = "provisioning"
+	StateComplete      = "complete"
+	StateFailed        = "failed"
+
+	// Condition types
+	ConditionTypeReady              = "Ready"
+	ConditionTypeGitCommitted       = "GitCommitted"
+	ConditionTypeArgocdAppCreated   = "ArgocdAppCreated"
+	ConditionTypeHiveProvisioning   = "HiveProvisioning"
+	ConditionTypeClusterProvisioned = "ClusterProvisioned"
+
+	// Requeue intervals
+	requeueAfterSuccess = 30 * time.Second
+	requeueAfterError   = 1 * time.Minute
 )
 
 // ClusterRequestReconciler reconciles a ClusterRequest object
 type ClusterRequestReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// TODO: Add GitClient, TemplateGenerator, SlackNotifier
 }
 
 // +kubebuilder:rbac:groups=opl.openshiftpartnerlabs.com,resources=clusterrequests,verbs=get;list;watch;create;update;patch;delete
@@ -39,19 +69,197 @@ type ClusterRequestReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the ClusterRequest object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *ClusterRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	logger := log.FromContext(ctx)
+	logger.Info("Reconciling ClusterRequest", "name", req.Name, "namespace", req.Namespace)
 
-	// TODO(user): your logic here
+	// Fetch the ClusterRequest instance
+	clusterRequest := &oplv1alpha1.ClusterRequest{}
+	if err := r.Get(ctx, req.NamespacedName, clusterRequest); err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.Info("ClusterRequest resource not found. Ignoring since object must be deleted")
+			return ctrl.Result{}, nil
+		}
+		logger.Error(err, "Failed to get ClusterRequest")
+		return ctrl.Result{}, err
+	}
+
+	// Handle deletion
+	if !clusterRequest.ObjectMeta.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, clusterRequest)
+	}
+
+	// Add finalizer if not present
+	if !controllerutil.ContainsFinalizer(clusterRequest, clusterRequestFinalizer) {
+		controllerutil.AddFinalizer(clusterRequest, clusterRequestFinalizer)
+		if err := r.Update(ctx, clusterRequest); err != nil {
+			logger.Error(err, "Failed to add finalizer")
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Initialize state if empty
+	if clusterRequest.Status.State == "" {
+		logger.Info("Initializing ClusterRequest state to pending")
+		clusterRequest.Status.State = StatePending
+		if err := r.Status().Update(ctx, clusterRequest); err != nil {
+			logger.Error(err, "Failed to update status")
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// State machine reconciliation
+	switch clusterRequest.Status.State {
+	case StatePending:
+		logger.Info("ClusterRequest is pending approval")
+		// Wait for external approval (Buffalo app will update state to 'approved')
+		return ctrl.Result{RequeueAfter: requeueAfterSuccess}, nil
+
+	case StateApproved:
+		logger.Info("Processing approved ClusterRequest")
+		return r.handleApproved(ctx, clusterRequest)
+
+	case StateGitCommitted:
+		logger.Info("Cluster configuration committed to Git, monitoring ArgoCD sync")
+		return r.handleGitCommitted(ctx, clusterRequest)
+
+	case StateProvisioning:
+		logger.Info("Cluster is provisioning via Hive")
+		// Hive watcher will update status when provisioning completes
+		return ctrl.Result{RequeueAfter: requeueAfterSuccess}, nil
+
+	case StateComplete:
+		logger.Info("Cluster provisioning complete")
+		return ctrl.Result{}, nil
+
+	case StateFailed:
+		logger.Info("ClusterRequest failed", "error", clusterRequest.Status.ErrorMessage)
+		// Check if we should retry
+		if clusterRequest.Status.RetryCount < 3 {
+			logger.Info("Retrying failed ClusterRequest", "retryCount", clusterRequest.Status.RetryCount)
+			clusterRequest.Status.State = StateApproved
+			clusterRequest.Status.RetryCount++
+			if err := r.Status().Update(ctx, clusterRequest); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: requeueAfterError}, nil
+		}
+		return ctrl.Result{}, nil
+
+	default:
+		logger.Info("Unknown state", "state", clusterRequest.Status.State)
+		return ctrl.Result{}, nil
+	}
+}
+
+// handleApproved processes an approved ClusterRequest by generating cluster configs and committing to Git
+func (r *ClusterRequestReconciler) handleApproved(ctx context.Context, cr *oplv1alpha1.ClusterRequest) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Set processing started timestamp
+	if cr.Status.ProcessingStartedAt == nil {
+		now := metav1.Now()
+		cr.Status.ProcessingStartedAt = &now
+		if err := r.Status().Update(ctx, cr); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// TODO: Generate cluster configuration files
+	// TODO: Commit to Git repository
+	// TODO: Update status with GitCommitSHA
+
+	// Placeholder: simulate successful git commit
+	logger.Info("TODO: Generate cluster configs and commit to Git")
+
+	// Update condition
+	r.setCondition(cr, ConditionTypeGitCommitted, metav1.ConditionFalse, "Pending", "Git commit not yet implemented")
+
+	// For now, mark as git-committed (will implement actual Git logic later)
+	cr.Status.State = StateGitCommitted
+	cr.Status.GitCommitSHA = "placeholder-sha"
+	r.setCondition(cr, ConditionTypeGitCommitted, metav1.ConditionTrue, "GitCommitted", "Cluster configuration committed to Git")
+
+	if err := r.Status().Update(ctx, cr); err != nil {
+		logger.Error(err, "Failed to update status")
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// handleGitCommitted monitors ArgoCD synchronization and transitions to provisioning
+func (r *ClusterRequestReconciler) handleGitCommitted(ctx context.Context, cr *oplv1alpha1.ClusterRequest) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// TODO: Check if ArgoCD Application exists and is synced
+	logger.Info("TODO: Monitor ArgoCD Application sync status")
+
+	// Placeholder: assume ArgoCD sync is complete
+	cr.Status.ArgocdAppCreated = true
+	cr.Status.State = StateProvisioning
+	r.setCondition(cr, ConditionTypeArgocdAppCreated, metav1.ConditionTrue, "AppCreated", "ArgoCD Application created and syncing")
+	r.setCondition(cr, ConditionTypeHiveProvisioning, metav1.ConditionUnknown, "Provisioning", "Waiting for Hive to start provisioning")
+
+	if err := r.Status().Update(ctx, cr); err != nil {
+		logger.Error(err, "Failed to update status")
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// handleDeletion handles cleanup when a ClusterRequest is deleted
+func (r *ClusterRequestReconciler) handleDeletion(ctx context.Context, cr *oplv1alpha1.ClusterRequest) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if controllerutil.ContainsFinalizer(cr, clusterRequestFinalizer) {
+		// TODO: Cleanup logic (e.g., delete Git files, notify Slack)
+		logger.Info("Cleaning up ClusterRequest resources")
+
+		// Remove finalizer
+		controllerutil.RemoveFinalizer(cr, clusterRequestFinalizer)
+		if err := r.Update(ctx, cr); err != nil {
+			logger.Error(err, "Failed to remove finalizer")
+			return ctrl.Result{}, err
+		}
+	}
 
 	return ctrl.Result{}, nil
+}
+
+// setCondition updates or adds a condition to the ClusterRequest status
+func (r *ClusterRequestReconciler) setCondition(cr *oplv1alpha1.ClusterRequest, conditionType string, status metav1.ConditionStatus, reason, message string) {
+	condition := metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		ObservedGeneration: cr.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             reason,
+		Message:            message,
+	}
+	meta.SetStatusCondition(&cr.Status.Conditions, condition)
+}
+
+// setErrorState updates the ClusterRequest to failed state with error message
+func (r *ClusterRequestReconciler) setErrorState(ctx context.Context, cr *oplv1alpha1.ClusterRequest, err error) error {
+	logger := log.FromContext(ctx)
+
+	cr.Status.State = StateFailed
+	cr.Status.ErrorMessage = err.Error()
+	now := metav1.Now()
+	cr.Status.ProcessingCompletedAt = &now
+
+	r.setCondition(cr, ConditionTypeReady, metav1.ConditionFalse, "Failed", fmt.Sprintf("ClusterRequest failed: %v", err))
+
+	if updateErr := r.Status().Update(ctx, cr); updateErr != nil {
+		logger.Error(updateErr, "Failed to update error status")
+		return updateErr
+	}
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

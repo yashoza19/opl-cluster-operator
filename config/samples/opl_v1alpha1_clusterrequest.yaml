@@ -4,6 +4,30 @@ metadata:
   labels:
     app.kubernetes.io/name: opl-cluster-operator
     app.kubernetes.io/managed-by: kustomize
-  name: clusterrequest-sample
+  name: dev-cluster-02
+  namespace: cluster-provisioning
 spec:
-  # TODO(user): Add fields here
+  clusterName: dev-cluster-02
+  environment: development
+  openshiftVersion: img4.20.10-x86-64-appsub
+  clusterSize: small
+  region: us-east-1
+  baseDomain: openshiftpartnerlabs.com
+  requestedBy: user@example.com
+  companyName: Example Corp
+  labId: 123
+
+  controlPlane:
+    instanceType: m5.xlarge
+    replicas: 3
+
+  workers:
+    instanceType: m5.2xlarge
+    replicas: 3
+    zones:
+      - us-east-1a
+
+  networking:
+    clusterNetworkCIDR: 10.128.0.0/14
+    serviceNetworkCIDR: 172.30.0.0/16
+    machineNetworkCIDR: 10.0.0.0/16
