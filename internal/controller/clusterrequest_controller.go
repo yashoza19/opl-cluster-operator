@@ -31,6 +31,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	oplv1alpha1 "github.com/openshift-partner-labs/opl-cluster-operator/api/v1alpha1"
+	"github.com/openshift-partner-labs/opl-cluster-operator/internal/git"
+	"github.com/openshift-partner-labs/opl-cluster-operator/internal/mappers"
+	"github.com/openshift-partner-labs/opl-cluster-operator/internal/templates"
 )
 
 const (
@@ -59,8 +62,10 @@ const (
 // ClusterRequestReconciler reconciles a ClusterRequest object
 type ClusterRequestReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	// TODO: Add GitClient, TemplateGenerator, SlackNotifier
+	Scheme      *runtime.Scheme
+	GitClient   *git.Client
+	TemplateGen *templates.Generator
+	// TODO: Add SlackNotifier
 }
 
 // +kubebuilder:rbac:groups=opl.openshiftpartnerlabs.com,resources=clusterrequests,verbs=get;list;watch;create;update;patch;delete
@@ -167,20 +172,42 @@ func (r *ClusterRequestReconciler) handleApproved(ctx context.Context, cr *oplv1
 		}
 	}
 
-	// TODO: Generate cluster configuration files
-	// TODO: Commit to Git repository
-	// TODO: Update status with GitCommitSHA
+	// Map ClusterRequest spec to cluster configuration
+	logger.Info("Mapping ClusterRequest to cluster configuration", "cluster", cr.Spec.ClusterName)
+	clusterConfig := mappers.MapClusterRequest(cr)
 
-	// Placeholder: simulate successful git commit
-	logger.Info("TODO: Generate cluster configs and commit to Git")
+	// Generate cluster configuration files from templates
+	logger.Info("Generating cluster configuration files", "cluster", cr.Spec.ClusterName)
+	files, err := r.TemplateGen.GenerateClusterFiles(clusterConfig)
+	if err != nil {
+		logger.Error(err, "Failed to generate cluster configuration files")
+		r.setCondition(cr, ConditionTypeGitCommitted, metav1.ConditionFalse, "TemplateFailed",
+			fmt.Sprintf("Failed to generate templates: %v", err))
+		if setErr := r.setErrorState(ctx, cr, err); setErr != nil {
+			return ctrl.Result{}, setErr
+		}
+		return ctrl.Result{RequeueAfter: requeueAfterError}, nil
+	}
 
-	// Update condition
-	r.setCondition(cr, ConditionTypeGitCommitted, metav1.ConditionFalse, "Pending", "Git commit not yet implemented")
+	// Commit cluster configuration to Git repository
+	logger.Info("Committing cluster configuration to Git", "cluster", cr.Spec.ClusterName)
+	commitSHA, err := r.GitClient.CommitCluster(cr.Spec.ClusterName, files)
+	if err != nil {
+		logger.Error(err, "Failed to commit cluster configuration to Git")
+		r.setCondition(cr, ConditionTypeGitCommitted, metav1.ConditionFalse, "GitCommitFailed",
+			fmt.Sprintf("Failed to commit to Git: %v", err))
+		if setErr := r.setErrorState(ctx, cr, err); setErr != nil {
+			return ctrl.Result{}, setErr
+		}
+		return ctrl.Result{RequeueAfter: requeueAfterError}, nil
+	}
 
-	// For now, mark as git-committed (will implement actual Git logic later)
+	// Update status with successful commit
+	logger.Info("Successfully committed cluster configuration to Git", "cluster", cr.Spec.ClusterName, "commitSHA", commitSHA)
 	cr.Status.State = StateGitCommitted
-	cr.Status.GitCommitSHA = "placeholder-sha"
-	r.setCondition(cr, ConditionTypeGitCommitted, metav1.ConditionTrue, "GitCommitted", "Cluster configuration committed to Git")
+	cr.Status.GitCommitSHA = commitSHA
+	r.setCondition(cr, ConditionTypeGitCommitted, metav1.ConditionTrue, "GitCommitted",
+		fmt.Sprintf("Cluster configuration committed to Git: %s", commitSHA))
 
 	if err := r.Status().Update(ctx, cr); err != nil {
 		logger.Error(err, "Failed to update status")
