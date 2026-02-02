@@ -5,7 +5,7 @@ metadata:
     app.kubernetes.io/name: opl-cluster-operator
     app.kubernetes.io/managed-by: kustomize
   name: dev-cluster-02
-  namespace: cluster-provisioning
+  namespace: default
 spec:
   clusterName: dev-cluster-02
   environment: development
@@ -19,11 +19,11 @@ spec:
 
   controlPlane:
     instanceType: m5.xlarge
-    replicas: 3
+    replicas: 1
 
   workers:
     instanceType: m5.2xlarge
-    replicas: 3
+    replicas: 0
     zones:
       - us-east-1a
 

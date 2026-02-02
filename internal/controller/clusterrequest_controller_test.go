@@ -27,7 +27,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	oplv1alpha1 "github.com/openshift-partner-labs/opl-cluster-operator/api/v1alpha1"
+	oplv1alpha1 "github.com/yashoza19/opl-cluster-operator/api/v1alpha1"
 )
 
 var _ = Describe("ClusterRequest Controller", func() {

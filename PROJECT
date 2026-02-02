@@ -9,7 +9,7 @@ plugins:
   manifests.sdk.operatorframework.io/v2: {}
   scorecard.sdk.operatorframework.io/v2: {}
 projectName: opl-cluster-operator
-repo: github.com/openshift-partner-labs/opl-cluster-operator
+repo: github.com/yashoza19/opl-cluster-operator
 resources:
 - api:
     crdVersion: v1
@@ -18,6 +18,6 @@ resources:
   domain: openshiftpartnerlabs.com
   group: opl
   kind: ClusterRequest
-  path: github.com/openshift-partner-labs/opl-cluster-operator/api/v1alpha1
+  path: github.com/yashoza19/opl-cluster-operator/api/v1alpha1
   version: v1alpha1
 version: "3"

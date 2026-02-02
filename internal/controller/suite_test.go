@@ -32,7 +32,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	oplv1alpha1 "github.com/openshift-partner-labs/opl-cluster-operator/api/v1alpha1"
+	oplv1alpha1 "github.com/yashoza19/opl-cluster-operator/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 

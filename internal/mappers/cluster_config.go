@@ -3,7 +3,7 @@ package mappers
 import (
 	"fmt"
 
-	oplv1alpha1 "github.com/openshift-partner-labs/opl-cluster-operator/api/v1alpha1"
+	oplv1alpha1 "github.com/yashoza19/opl-cluster-operator/api/v1alpha1"
 )
 
 // ClusterConfig represents the configuration needed for cluster templates
@@ -84,9 +84,9 @@ func MapClusterRequest(cr *oplv1alpha1.ClusterRequest) ClusterConfig {
 		if cr.Spec.Workers.InstanceType != "" {
 			workerType = cr.Spec.Workers.InstanceType
 		}
-		if cr.Spec.Workers.Replicas > 0 {
-			workerReplicas = cr.Spec.Workers.Replicas
-		}
+		// Worker replicas can be 0 (valid for clusters without workers)
+		// Always use the explicit value when Workers config is provided
+		workerReplicas = cr.Spec.Workers.Replicas
 		if len(cr.Spec.Workers.Zones) > 0 {
 			workerZones = cr.Spec.Workers.Zones
 		}
