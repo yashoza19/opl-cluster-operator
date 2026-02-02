@@ -6,7 +6,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/openshift-partner-labs/opl-cluster-operator/internal/mappers"
+	"github.com/yashoza19/opl-cluster-operator/internal/mappers"
 )
 
 // Generator handles template rendering for cluster configurations
@@ -35,46 +35,21 @@ func (g *Generator) GenerateClusterFiles(config mappers.ClusterConfig) (map[stri
 	}
 	files["cluster-config.yaml"] = clusterConfig
 
-	// Generate cluster-deployment.yaml
-	clusterDeployment, err := g.generateClusterDeployment(config)
+	// Generate argocd-application.yaml
+	argoCDApp, err := g.generateArgoCDApplication(config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate cluster-deployment.yaml: %w", err)
+		return nil, fmt.Errorf("failed to generate argocd-application.yaml: %w", err)
 	}
-	files["cluster-deployment.yaml"] = clusterDeployment
+	files["argocd-application.yaml"] = argoCDApp
 
 	return files, nil
 }
 
 // generateKustomization generates the kustomization.yaml file
 func (g *Generator) generateKustomization(config mappers.ClusterConfig) (string, error) {
-	tmpl := `apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-
-namespace: {{.ClusterName}}
-
-resources:
-  - cluster-deployment.yaml
-
-configMapGenerator:
-  - name: cluster-config
-    files:
-      - cluster-config.yaml
-
-labels:
-  - pairs:
-      environment: {{.Environment}}
-      company: {{.CompanyName}}
-      requested-by: {{.RequestedBy}}
-`
-
-	return g.render(tmpl, config)
-}
-
-// generateClusterConfig generates the cluster-config.yaml file
-func (g *Generator) generateClusterConfig(config mappers.ClusterConfig) (string, error) {
 	zonesYAML := ""
 	for _, zone := range config.WorkerZones {
-		zonesYAML += fmt.Sprintf("  - %s\n", zone)
+		zonesYAML += fmt.Sprintf("                   - %s\n", zone)
 	}
 	zonesYAML = strings.TrimSuffix(zonesYAML, "\n")
 
@@ -86,103 +61,269 @@ func (g *Generator) generateClusterConfig(config mappers.ClusterConfig) (string,
 		WorkerZonesYAML: zonesYAML,
 	}
 
-	tmpl := `# Cluster Configuration for {{.ClusterName}}
-clusterName: {{.ClusterName}}
-environment: {{.Environment}}
-cloudProvider: {{.CloudProvider}}
-region: {{.Region}}
-baseDomain: {{.BaseDomain}}
-openshiftVersion: {{.OpenshiftVersion}}
+	tmpl := `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
 
-controlPlane:
-  instanceType: {{.ControlPlaneInstanceType}}
-  replicas: {{.ControlPlaneReplicas}}
+namespace: {{.ClusterName}}
 
-workers:
-  instanceType: {{.WorkerInstanceType}}
-  replicas: {{.WorkerReplicas}}
-  zones:
+resources:
+  - ../../cluster-templates/aws-ha/base
+  - cluster-config.yaml
+
+# Patches to customize the cluster
+patches:
+  # Update ClusterDeployment with specific values
+  - target:
+      kind: ClusterDeployment
+    patch: |-
+     - op: replace
+       path: /metadata/name
+       value: {{.ClusterName}}
+     - op: replace
+       path: /metadata/namespace
+       value: {{.ClusterName}}
+     - op: replace
+       path: /spec/clusterName
+       value: {{.ClusterName}}
+     - op: replace
+       path: /spec/baseDomain
+       value: {{.BaseDomain}}
+     - op: replace
+       path: /spec/platform/aws/region
+       value: {{.Region}}
+     - op: replace
+       path: /spec/provisioning/imageSetRef/name
+       value: {{.OpenshiftVersion}}
+     - op: replace
+       path: /spec/provisioning/installConfigSecretRef/name
+       value: {{.ClusterName}}-install-config
+     - op: replace
+       path: /spec/provisioning/sshPrivateKeySecretRef/name
+       value: {{.ClusterName}}-ssh-key
+     - op: replace
+       path: /spec/pullSecretRef/name
+       value: {{.ClusterName}}-pull-secret
+     - op: replace
+       path: /spec/platform/aws/credentialsSecretRef/name
+       value: {{.ClusterName}}-aws-credentials
+     - op: remove
+       path: /spec/provisioning/manifestsConfigMapRef
+
+  # Update MachinePool with specific values
+  - target:
+      kind: MachinePool
+    patch: |-
+     - op: replace
+       path: /metadata/name
+       value: {{.ClusterName}}-worker
+     - op: replace
+       path: /metadata/namespace
+       value: {{.ClusterName}}
+     - op: replace
+       path: /spec/clusterDeploymentRef/name
+       value: {{.ClusterName}}
+     - op: replace
+       path: /spec/platform/aws/type
+       value: {{.WorkerInstanceType}}
+     - op: replace
+       path: /spec/replicas
+       value: {{.WorkerReplicas}}
+
+  # Update ManagedCluster
+  - target:
+      kind: ManagedCluster
+    patch: |-
+     - op: replace
+       path: /metadata/name
+       value: {{.ClusterName}}
+     - op: replace
+       path: /metadata/labels/environment
+       value: {{.Environment}}
+
+  # Update KlusterletAddonConfig
+  - target:
+      kind: KlusterletAddonConfig
+    patch: |-
+     - op: replace
+       path: /metadata/name
+       value: {{.ClusterName}}
+     - op: replace
+       path: /metadata/namespace
+       value: {{.ClusterName}}
+     - op: replace
+       path: /spec/clusterName
+       value: {{.ClusterName}}
+     - op: replace
+       path: /spec/clusterNamespace
+       value: {{.ClusterName}}
+
+  # Update install-config Secret
+  - target:
+      kind: Secret
+      name: cluster-placeholder-install-config
+    patch: |-
+     - op: replace
+       path: /metadata/name
+       value: {{.ClusterName}}-install-config
+     - op: replace
+       path: /metadata/namespace
+       value: {{.ClusterName}}
+     - op: replace
+       path: /stringData/install-config.yaml
+       value: |
+         apiVersion: v1
+         baseDomain: {{.BaseDomain}}
+         metadata:
+           name: {{.ClusterName}}
+
+         controlPlane:
+           name: master
+           platform:
+             aws:
+               type: {{.ControlPlaneInstanceType}}
+               rootVolume:
+                 iops: 4000
+                 size: 120
+                 type: gp3
+               zones:
+                 - {{index .WorkerZones 0}}
+           replicas: {{.ControlPlaneReplicas}}
+
+         compute:
+           - name: worker
+             platform:
+               aws:
+                 type: {{.WorkerInstanceType}}
+                 rootVolume:
+                   iops: 2000
+                   size: 100
+                   type: gp3
+                 zones:
 {{.WorkerZonesYAML}}
+             replicas: {{.WorkerReplicas}}
 
-networking:
-  clusterNetworkCIDR: {{.ClusterNetworkCIDR}}
-  serviceNetworkCIDR: {{.ServiceNetworkCIDR}}
-  machineNetworkCIDR: {{.MachineNetworkCIDR}}
+         networking:
+           clusterNetwork:
+             - cidr: {{.ClusterNetworkCIDR}}
+               hostPrefix: 23
+           machineNetwork:
+             - cidr: {{.MachineNetworkCIDR}}
+           serviceNetwork:
+             - {{.ServiceNetworkCIDR}}
+           networkType: OVNKubernetes
 
-metadata:
-  companyName: {{.CompanyName}}
-  requestedBy: {{.RequestedBy}}
+         platform:
+           aws:
+             region: {{.Region}}
+
+         fips: false
+         publish: External
+
+# Hive will automatically populate clusterMetadata fields after provisioning
 `
 
 	return g.render(tmpl, data)
 }
 
-// generateClusterDeployment generates the Hive ClusterDeployment manifest
-func (g *Generator) generateClusterDeployment(config mappers.ClusterConfig) (string, error) {
-	tmpl := `apiVersion: hive.openshift.io/v1
-kind: ClusterDeployment
+// generateClusterConfig generates the cluster-config.yaml file as a ConfigMap
+func (g *Generator) generateClusterConfig(config mappers.ClusterConfig) (string, error) {
+	// Join zones into a single string
+	workerZones := strings.Join(config.WorkerZones, ",")
+
+	data := struct {
+		mappers.ClusterConfig
+		WorkerZonesString string
+	}{
+		ClusterConfig:     config,
+		WorkerZonesString: workerZones,
+	}
+
+	tmpl := `---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-config
+  namespace: {{.ClusterName}}
+data:
+  clusterName: {{.ClusterName}}
+  baseDomain: {{.BaseDomain}}
+  region: {{.Region}}
+  openshiftVersion: {{.OpenshiftVersion}}
+  environment: {{.Environment}}
+
+  # Control plane configuration
+  controlPlaneInstanceType: {{.ControlPlaneInstanceType}}
+  controlPlaneReplicas: "{{.ControlPlaneReplicas}}"
+
+  # Worker configuration
+  workerInstanceType: {{.WorkerInstanceType}}
+  workerReplicas: "{{.WorkerReplicas}}"
+  workerZones: "{{.WorkerZonesString}}"
+
+  # Networking
+  clusterNetworkCIDR: {{.ClusterNetworkCIDR}}
+  serviceNetworkCIDR: {{.ServiceNetworkCIDR}}
+  machineNetworkCIDR: {{.MachineNetworkCIDR}}
+`
+
+	return g.render(tmpl, data)
+}
+
+// generateArgoCDApplication generates the argocd-application.yaml file
+func (g *Generator) generateArgoCDApplication(config mappers.ClusterConfig) (string, error) {
+	tmpl := `---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
 metadata:
   name: {{.ClusterName}}
-  namespace: {{.ClusterName}}
+  namespace: openshift-gitops
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
   labels:
+    cluster-name: {{.ClusterName}}
     environment: {{.Environment}}
-    company: {{.CompanyName}}
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
 spec:
-  baseDomain: {{.BaseDomain}}
-  clusterName: {{.ClusterName}}
-  platform:
-    aws:
-      region: {{.Region}}
-      credentialsSecretRef:
-        name: aws-creds
-  provisioning:
-    imageSetRef:
-      name: {{.OpenshiftVersion}}
-    installConfigSecretRef:
-      name: install-config
-  pullSecretRef:
-    name: pull-secret
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: install-config
-  namespace: {{.ClusterName}}
-type: Opaque
-stringData:
-  install-config.yaml: |
-    apiVersion: v1
-    baseDomain: {{.BaseDomain}}
-    metadata:
-      name: {{.ClusterName}}
-    platform:
-      aws:
-        region: {{.Region}}
-    controlPlane:
-      name: master
-      platform:
-        aws:
-          type: {{.ControlPlaneInstanceType}}
-      replicas: {{.ControlPlaneReplicas}}
-    compute:
-    - name: worker
-      platform:
-        aws:
-          type: {{.WorkerInstanceType}}
-          zones:{{range .WorkerZones}}
-          - {{.}}{{end}}
-      replicas: {{.WorkerReplicas}}
-    networking:
-      clusterNetwork:
-      - cidr: {{.ClusterNetworkCIDR}}
-        hostPrefix: 23
-      serviceNetwork:
-      - {{.ServiceNetworkCIDR}}
-      machineNetwork:
-      - cidr: {{.MachineNetworkCIDR}}
-      networkType: OVNKubernetes
-    pullSecret: ""
-    sshKey: ""
+  project: cluster-provisioning
+
+  source:
+    repoURL: https://github.com/yashoza19/opl-argocd.git
+    targetRevision: master
+    path: clusters/{{.ClusterName}}
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {{.ClusterName}}
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false  # CRITICAL: Disable selfHeal to prevent deletion of Hive-created secrets
+      allowEmpty: false
+    syncOptions:
+      - PrunePropagationPolicy=orphan
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 10m
+
+  # Ignore differences in dynamic fields
+  ignoreDifferences:
+    - group: hive.openshift.io
+      kind: ClusterDeployment
+      jsonPointers:
+        - /status
+        - /spec/clusterMetadata  # Ignore entire clusterMetadata section (Hive-managed)
+        - /spec/installed  # Ignore installed timestamp (Hive-managed)
+    - group: cluster.open-cluster-management.io
+      kind: ManagedCluster
+      jsonPointers:
+        - /status
+        - /spec/managedClusterClientConfigs
 `
 
 	return g.render(tmpl, config)

@@ -91,7 +91,7 @@ type ControlPlaneConfig struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=5
 	// +kubebuilder:default=3
-	Replicas int `json:"replicas,omitempty"`
+	Replicas int `json:"replicas"`
 }
 
 // WorkersConfig defines worker node configuration
@@ -104,7 +104,7 @@ type WorkersConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=3
-	Replicas int `json:"replicas,omitempty"`
+	Replicas int `json:"replicas"`
 
 	// Zones is the list of availability zones for worker nodes
 	// +optional

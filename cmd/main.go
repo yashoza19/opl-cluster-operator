@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -37,8 +38,10 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	oplv1alpha1 "github.com/openshift-partner-labs/opl-cluster-operator/api/v1alpha1"
-	"github.com/openshift-partner-labs/opl-cluster-operator/internal/controller"
+	oplv1alpha1 "github.com/yashoza19/opl-cluster-operator/api/v1alpha1"
+	"github.com/yashoza19/opl-cluster-operator/internal/controller"
+	"github.com/yashoza19/opl-cluster-operator/internal/git"
+	"github.com/yashoza19/opl-cluster-operator/internal/templates"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -202,9 +205,71 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize Git client
+	gitRepoURL := os.Getenv("GIT_REPO_URL")
+	if gitRepoURL == "" {
+		setupLog.Error(fmt.Errorf("GIT_REPO_URL environment variable not set"), "missing required environment variable")
+		os.Exit(1)
+	}
+
+	gitBranch := os.Getenv("GIT_BRANCH")
+	if gitBranch == "" {
+		gitBranch = "main" // Default to main branch
+	}
+
+	gitSSHKeyPath := os.Getenv("GIT_SSH_KEY_PATH")
+	if gitSSHKeyPath == "" {
+		gitSSHKeyPath = "/etc/git-secret/id_rsa" // Default SSH key path
+	}
+
+	gitLocalPath := os.Getenv("GIT_LOCAL_PATH")
+	if gitLocalPath == "" {
+		gitLocalPath = "/tmp/opl-argocd" // Default local clone path
+	}
+
+	gitAuthorName := os.Getenv("GIT_AUTHOR_NAME")
+	if gitAuthorName == "" {
+		gitAuthorName = "OPL Cluster Operator"
+	}
+
+	gitAuthorEmail := os.Getenv("GIT_AUTHOR_EMAIL")
+	if gitAuthorEmail == "" {
+		gitAuthorEmail = "cluster-operator@openshiftpartnerlabs.com"
+	}
+
+	setupLog.Info("Initializing Git client",
+		"repoURL", gitRepoURL,
+		"branch", gitBranch,
+		"localPath", gitLocalPath)
+
+	gitClient, err := git.NewClient(git.Config{
+		RepoURL:     gitRepoURL,
+		Branch:      gitBranch,
+		LocalPath:   gitLocalPath,
+		SSHKeyPath:  gitSSHKeyPath,
+		AuthorName:  gitAuthorName,
+		AuthorEmail: gitAuthorEmail,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to create Git client")
+		os.Exit(1)
+	}
+
+	// Initialize Git repository (clone or pull)
+	if err := gitClient.Initialize(); err != nil {
+		setupLog.Error(err, "unable to initialize Git repository")
+		os.Exit(1)
+	}
+
+	// Initialize template generator
+	templateGen := templates.NewGenerator()
+
+	// Set up ClusterRequest controller with Git client and template generator
 	if err := (&controller.ClusterRequestReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		GitClient:   gitClient,
+		TemplateGen: templateGen,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ClusterRequest")
 		os.Exit(1)

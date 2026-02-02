@@ -21,19 +21,21 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	oplv1alpha1 "github.com/openshift-partner-labs/opl-cluster-operator/api/v1alpha1"
-	"github.com/openshift-partner-labs/opl-cluster-operator/internal/git"
-	"github.com/openshift-partner-labs/opl-cluster-operator/internal/mappers"
-	"github.com/openshift-partner-labs/opl-cluster-operator/internal/templates"
+	oplv1alpha1 "github.com/yashoza19/opl-cluster-operator/api/v1alpha1"
+	"github.com/yashoza19/opl-cluster-operator/internal/git"
+	"github.com/yashoza19/opl-cluster-operator/internal/mappers"
+	"github.com/yashoza19/opl-cluster-operator/internal/templates"
 )
 
 const (
@@ -53,10 +55,23 @@ const (
 	ConditionTypeArgocdAppCreated   = "ArgocdAppCreated"
 	ConditionTypeHiveProvisioning   = "HiveProvisioning"
 	ConditionTypeClusterProvisioned = "ClusterProvisioned"
+	ConditionTypeNamespaceCreated   = "NamespaceCreated"
 
 	// Requeue intervals
 	requeueAfterSuccess = 30 * time.Second
 	requeueAfterError   = 1 * time.Minute
+
+	// Default namespace for source secrets
+	defaultNamespace = "default"
+)
+
+var (
+	// Secrets to copy from default namespace to cluster namespace
+	secretsToCopy = []string{
+		"pull-secret",
+		"ssh-key",
+		"aws-credentials",
+	}
 )
 
 // ClusterRequestReconciler reconciles a ClusterRequest object
@@ -71,6 +86,8 @@ type ClusterRequestReconciler struct {
 // +kubebuilder:rbac:groups=opl.openshiftpartnerlabs.com,resources=clusterrequests,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=opl.openshiftpartnerlabs.com,resources=clusterrequests/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=opl.openshiftpartnerlabs.com,resources=clusterrequests/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -159,6 +176,131 @@ func (r *ClusterRequestReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 }
 
+// ensureNamespaceAndSecrets creates the cluster namespace and copies required secrets
+func (r *ClusterRequestReconciler) ensureNamespaceAndSecrets(ctx context.Context, cr *oplv1alpha1.ClusterRequest) error {
+	logger := log.FromContext(ctx)
+	clusterName := cr.Spec.ClusterName
+
+	// Create cluster namespace
+	if err := r.createClusterNamespace(ctx, clusterName); err != nil {
+		logger.Error(err, "Failed to create cluster namespace", "namespace", clusterName)
+		return fmt.Errorf("failed to create namespace %s: %w", clusterName, err)
+	}
+
+	// Copy secrets from default namespace to cluster namespace
+	if err := r.copySecretsToNamespace(ctx, clusterName); err != nil {
+		logger.Error(err, "Failed to copy secrets to cluster namespace", "namespace", clusterName)
+		return fmt.Errorf("failed to copy secrets to namespace %s: %w", clusterName, err)
+	}
+
+	logger.Info("Successfully created namespace and copied secrets", "namespace", clusterName)
+	return nil
+}
+
+// createClusterNamespace creates a namespace for the cluster if it doesn't exist
+func (r *ClusterRequestReconciler) createClusterNamespace(ctx context.Context, clusterName string) error {
+	logger := log.FromContext(ctx)
+
+	namespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: clusterName,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "opl-cluster-operator",
+				"opl.openshiftpartnerlabs.com/cluster": clusterName,
+			},
+		},
+	}
+
+	err := r.Get(ctx, types.NamespacedName{Name: clusterName}, &corev1.Namespace{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.Info("Creating cluster namespace", "namespace", clusterName)
+			if err := r.Create(ctx, namespace); err != nil {
+				return fmt.Errorf("failed to create namespace: %w", err)
+			}
+			logger.Info("Successfully created cluster namespace", "namespace", clusterName)
+			return nil
+		}
+		return fmt.Errorf("failed to check namespace existence: %w", err)
+	}
+
+	logger.Info("Namespace already exists", "namespace", clusterName)
+	return nil
+}
+
+// copySecretsToNamespace copies required secrets from default namespace to the cluster namespace
+func (r *ClusterRequestReconciler) copySecretsToNamespace(ctx context.Context, clusterName string) error {
+	logger := log.FromContext(ctx)
+
+	for _, secretName := range secretsToCopy {
+		// Get the source secret from default namespace
+		sourceSecret := &corev1.Secret{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      secretName,
+			Namespace: defaultNamespace,
+		}, sourceSecret)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.Info("Source secret not found, skipping", "secret", secretName, "namespace", defaultNamespace)
+				continue
+			}
+			return fmt.Errorf("failed to get source secret %s: %w", secretName, err)
+		}
+
+		// Create the destination secret with cluster-prefixed name
+		destSecretName := fmt.Sprintf("%s-%s", clusterName, secretName)
+		destSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      destSecretName,
+				Namespace: clusterName,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "opl-cluster-operator",
+					"opl.openshiftpartnerlabs.com/cluster": clusterName,
+					"opl.openshiftpartnerlabs.com/source-secret": secretName,
+				},
+			},
+			Type: sourceSecret.Type,
+			Data: sourceSecret.Data,
+		}
+
+		// Check if destination secret already exists
+		existingSecret := &corev1.Secret{}
+		err = r.Get(ctx, types.NamespacedName{
+			Name:      destSecretName,
+			Namespace: clusterName,
+		}, existingSecret)
+
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				// Create the secret
+				logger.Info("Copying secret to cluster namespace",
+					"sourceSecret", secretName,
+					"destSecret", destSecretName,
+					"namespace", clusterName)
+				if err := r.Create(ctx, destSecret); err != nil {
+					return fmt.Errorf("failed to create secret %s in namespace %s: %w", destSecretName, clusterName, err)
+				}
+				logger.Info("Successfully copied secret", "secret", destSecretName, "namespace", clusterName)
+			} else {
+				return fmt.Errorf("failed to check secret existence: %w", err)
+			}
+		} else {
+			// Secret exists, update it
+			logger.Info("Updating existing secret in cluster namespace",
+				"secret", destSecretName,
+				"namespace", clusterName)
+			existingSecret.Data = sourceSecret.Data
+			existingSecret.Type = sourceSecret.Type
+			if err := r.Update(ctx, existingSecret); err != nil {
+				return fmt.Errorf("failed to update secret %s in namespace %s: %w", destSecretName, clusterName, err)
+			}
+			logger.Info("Successfully updated secret", "secret", destSecretName, "namespace", clusterName)
+		}
+	}
+
+	return nil
+}
+
 // handleApproved processes an approved ClusterRequest by generating cluster configs and committing to Git
 func (r *ClusterRequestReconciler) handleApproved(ctx context.Context, cr *oplv1alpha1.ClusterRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -170,6 +312,26 @@ func (r *ClusterRequestReconciler) handleApproved(ctx context.Context, cr *oplv1
 		if err := r.Status().Update(ctx, cr); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	// Create cluster namespace and copy secrets
+	logger.Info("Ensuring cluster namespace and secrets exist", "cluster", cr.Spec.ClusterName)
+	if err := r.ensureNamespaceAndSecrets(ctx, cr); err != nil {
+		logger.Error(err, "Failed to create namespace and copy secrets")
+		r.setCondition(cr, ConditionTypeNamespaceCreated, metav1.ConditionFalse, "NamespaceCreationFailed",
+			fmt.Sprintf("Failed to create namespace and copy secrets: %v", err))
+		if setErr := r.setErrorState(ctx, cr, err); setErr != nil {
+			return ctrl.Result{}, setErr
+		}
+		return ctrl.Result{RequeueAfter: requeueAfterError}, nil
+	}
+
+	// Update condition for successful namespace creation
+	r.setCondition(cr, ConditionTypeNamespaceCreated, metav1.ConditionTrue, "NamespaceCreated",
+		fmt.Sprintf("Namespace %s created and secrets copied successfully", cr.Spec.ClusterName))
+	if err := r.Status().Update(ctx, cr); err != nil {
+		logger.Error(err, "Failed to update status after namespace creation")
+		return ctrl.Result{}, err
 	}
 
 	// Map ClusterRequest spec to cluster configuration

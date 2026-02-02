@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/openshift-partner-labs/opl-cluster-operator/test/utils"
+	"github.com/yashoza19/opl-cluster-operator/test/utils"
 )
 
 var (

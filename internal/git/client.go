@@ -6,21 +6,24 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
+	gitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 )
 
 // Client handles Git operations for cluster configuration management
 type Client struct {
-	repoURL    string
-	branch     string
-	localPath  string
-	auth       transport.AuthMethod
-	authorName string
+	repoURL     string
+	branch      string
+	localPath   string
+	auth        transport.AuthMethod
+	authorName  string
 	authorEmail string
 }
 
@@ -47,12 +50,27 @@ func NewClient(cfg Config) (*Client, error) {
 	}
 
 	// Set up authentication
-	var err error
 	if cfg.SSHKeyPath != "" {
-		client.auth, err = ssh.NewPublicKeysFromFile("git", cfg.SSHKeyPath, "")
+		// Read SSH key file
+		keyBytes, err := os.ReadFile(cfg.SSHKeyPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load SSH key: %w", err)
+			return nil, fmt.Errorf("failed to read SSH key: %w", err)
 		}
+
+		// Parse private key
+		signer, err := ssh.ParsePrivateKey(keyBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse SSH key: %w", err)
+		}
+
+		// Create SSH auth with insecure host key callback
+		// Disable host key checking (insecure but simplifies setup for demo)
+		publicKeys := &gitssh.PublicKeys{
+			User:   "git",
+			Signer: signer,
+		}
+		publicKeys.HostKeyCallback = ssh.InsecureIgnoreHostKey()
+		client.auth = publicKeys
 	} else if cfg.Username != "" && cfg.Password != "" {
 		client.auth = &http.BasicAuth{
 			Username: cfg.Username,
@@ -94,7 +112,7 @@ func (c *Client) Initialize() error {
 	_, err := git.PlainClone(c.localPath, false, &git.CloneOptions{
 		URL:           c.repoURL,
 		Auth:          c.auth,
-		ReferenceName: git.ReferenceName(fmt.Sprintf("refs/heads/%s", c.branch)),
+		ReferenceName: plumbing.ReferenceName(fmt.Sprintf("refs/heads/%s", c.branch)),
 		SingleBranch:  true,
 	})
 	if err != nil {
