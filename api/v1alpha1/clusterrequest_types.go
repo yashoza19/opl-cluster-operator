@@ -42,12 +42,19 @@ type ClusterRequestSpec struct {
 	// +kubebuilder:default="img4.20.10-x86-64-appsub"
 	OpenshiftVersion string `json:"openshiftVersion"`
 
-	// ClusterSize defines the cluster configuration size (small, medium, large)
+	// ClusterSize defines the cluster configuration size (small, medium, large, xl)
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=small;medium;large
+	// +kubebuilder:validation:Enum=small;medium;large;xl
 	ClusterSize string `json:"clusterSize"`
 
-	// Region specifies the AWS region for cluster deployment
+	// CloudProvider specifies the cloud provider (currently only AWS is supported)
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=aws
+	// +kubebuilder:default="aws"
+	CloudProvider string `json:"cloudProvider"`
+
+	// Region specifies the region for cluster deployment (e.g., na1, na2, na3, apac, emea)
+	// This will be mapped to the actual cloud provider region
 	// +kubebuilder:validation:Required
 	Region string `json:"region"`
 
@@ -79,6 +86,11 @@ type ClusterRequestSpec struct {
 	// LabID is the reference to the database lab ID
 	// +optional
 	LabID int `json:"labId,omitempty"`
+
+	// RequestType is the type of request from the database (ocpv, engineering, general, rhoai, nvidia)
+	// This determines the EC2 instance types to use
+	// +optional
+	RequestType string `json:"requestType,omitempty"`
 }
 
 // ControlPlaneConfig defines control plane node configuration

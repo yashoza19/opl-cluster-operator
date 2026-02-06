@@ -10,22 +10,26 @@ spec:
   clusterName: dev-cluster-02
   environment: development
   openshiftVersion: img4.20.10-x86-64-appsub
-  clusterSize: small
-  region: us-east-1
+  clusterSize: medium  # Options: small (m7i.large), medium (m7i.xlarge), large (m7i.2xlarge), xl (m7i.4xlarge)
+  cloudProvider: aws
+  region: na1  # Database region (na1, na2, na3, apac, emea) - will be mapped to us-east-1
   baseDomain: openshiftpartnerlabs.com
   requestedBy: user@example.com
   companyName: Example Corp
   labId: 123
+  requestType: engineering  # Options: ocpv (bare metal), engineering, general, rhoai (GPU), nvidia (GPU)
 
-  controlPlane:
-    instanceType: m5.xlarge
-    replicas: 1
+  # Optional: Override instance types and replicas (uncomment to use)
+  # controlPlane:
+  #   instanceType: m7i.2xlarge
+  #   replicas: 3
 
-  workers:
-    instanceType: m5.2xlarge
-    replicas: 0
-    zones:
-      - us-east-1a
+  # workers:
+  #   instanceType: m7i.2xlarge
+  #   replicas: 3
+  #   zones:
+  #     - us-east-1a
+  #     - us-east-1b
 
   networking:
     clusterNetworkCIDR: 10.128.0.0/14

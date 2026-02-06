@@ -5,11 +5,13 @@ A Kubernetes operator that automates OpenShift cluster provisioning through GitO
 ## Features
 
 - **Declarative API**: Define cluster requests as Kubernetes custom resources
+- **Database Sync Controller**: Automatically syncs cluster requests from PostgreSQL database
 - **GitOps Integration**: Automatically commits cluster configs to Git repository
 - **State Management**: Full state machine from pending → complete/failed
 - **ArgoCD Sync**: Generated configs are automatically synced by ArgoCD
 - **Hive Provisioning**: Integrates with Hive for actual cluster creation on AWS
-- **Size Presets**: Pre-configured cluster sizes (small, medium, large)
+- **Size Presets**: Pre-configured cluster sizes (small, medium, large, xl)
+- **Smart Mapping**: Automatic instance type, region, and version mapping
 - **Secret Management**: Automatic secret copying to cluster namespaces
 - **Retry Logic**: Automatic retry on failures (up to 3 attempts)
 
@@ -32,6 +34,15 @@ make install
 # Create SSH secret for Git access
 kubectl create secret generic git-ssh-key \
   --from-file=id_rsa=$HOME/.ssh/id_rsa \
+  -n opl-cluster-operator-system
+
+# Create database secret (optional, for database sync feature)
+kubectl create secret generic database-sync-secret \
+  --from-literal=host=your-postgres-host \
+  --from-literal=port=5432 \
+  --from-literal=database=your-database \
+  --from-literal=username=your-username \
+  --from-literal=password=your-password \
   -n opl-cluster-operator-system
 
 # Deploy the operator
@@ -75,6 +86,8 @@ kubectl describe clusterrequest dev-cluster-01
 
 ## Environment Variables
 
+### Core Operator
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `GIT_REPO_URL` | ✅ | - | Git repository URL |
@@ -83,10 +96,27 @@ kubectl describe clusterrequest dev-cluster-01
 | `GIT_AUTHOR_NAME` | ❌ | `OPL Cluster Operator` | Commit author name |
 | `GIT_AUTHOR_EMAIL` | ❌ | `cluster-operator@openshiftpartnerlabs.com` | Commit author email |
 
+### Database Sync Controller (Optional)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DB_HOST` | ✅ | - | PostgreSQL host (from secret) |
+| `DB_PORT` | ✅ | `5432` | PostgreSQL port (from secret) |
+| `DB_NAME` | ✅ | - | Database name (from secret) |
+| `DB_USER` | ✅ | - | Database username (from secret) |
+| `DB_PASSWORD` | ✅ | - | Database password (from secret) |
+| `DB_SYNC_INTERVAL` | ❌ | `30s` | Sync interval (from configmap) |
+
 ## Architecture
 
+### Direct API Flow
 ```
 Buffalo App → ClusterRequest CR → Operator → Git Commit → ArgoCD → Hive → Cluster
+```
+
+### Database Sync Flow
+```
+Buffalo App → PostgreSQL → DB Sync Controller → ClusterRequest CR → Operator → Git Commit → ArgoCD → Hive → Cluster
 ```
 
 **State Flow:**
@@ -99,16 +129,18 @@ pending → approved → git-committed → provisioning → complete/failed
 ### ✅ Completed
 - ClusterRequest CRD with full spec and status
 - Controller with state machine reconciliation
+- Database sync controller for PostgreSQL integration
+- Instance type, region, and version mapping utilities
 - Git client with SSH/HTTPS authentication
 - Template generator (kustomization, cluster-config, argocd-app)
-- Cluster config mapper with size presets
+- Cluster config mapper with size presets (small, medium, large, xl)
 - Namespace and secret management
 - Retry logic and error handling
 - RBAC and deployment manifests
+- Helper scripts for database management
 
 ### 🚧 Planned
 - Hive watcher for status updates
-- Buffalo app integration
 - Slack notifications
 - Comprehensive tests
 - Metrics and observability
@@ -116,6 +148,10 @@ pending → approved → git-committed → provisioning → complete/failed
 ## Documentation
 
 - **[Design Document](CLUSTER_OPERATOR_DESIGN.md)** - Complete architecture and implementation details
+- **[Database Sync Design](DATABASE_SYNC_DESIGN.md)** - Database sync controller architecture
+- **[Instance Type Selection](INSTANCE_TYPE_SELECTION.md)** - Instance type mapping logic
+- **[Version Mapping](VERSION_MAPPING.md)** - OpenShift version mapping
+- **[Deployment Notes](config/manager/DEPLOYMENT_NOTES.md)** - Database sync deployment guide
 - **[Sample ClusterRequest](config/samples/opl_v1alpha1_clusterrequest.yaml)** - Example CR
 - **[API Reference](api/v1alpha1/clusterrequest_types.go)** - CRD field definitions
 
@@ -173,13 +209,17 @@ make uninstall
 ├── config/                    # Kubernetes manifests
 │   ├── crd/                   # CRD YAML files
 │   ├── rbac/                  # RBAC manifests
-│   ├── manager/               # Operator deployment
+│   ├── manager/               # Operator deployment & DB sync config
 │   └── samples/               # Example ClusterRequests
 ├── internal/
 │   ├── controller/            # Reconciliation logic
+│   │   ├── clusterrequest_controller.go
+│   │   └── dbsync_controller.go
+│   ├── database/              # Database client and models
 │   ├── git/                   # Git client
 │   ├── templates/             # Template generator
-│   └── mappers/               # Config mappers
+│   └── mappers/               # Config mappers (cluster, instance, region, version)
+├── hack/                      # Helper scripts
 └── test/                      # Tests
 ```
 
@@ -204,5 +244,5 @@ Apache License 2.0 - See LICENSE file for details
 
 ---
 
-**Version**: v0.1.0-alpha
-**Status**: Core implementation complete, integrations pending
+**Version**: v0.2.3
+**Status**: Core implementation and database sync integration complete

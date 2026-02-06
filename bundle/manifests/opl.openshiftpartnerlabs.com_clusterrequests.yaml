@@ -66,6 +66,13 @@ spec:
                 default: openshiftpartnerlabs.com
                 description: BaseDomain is the base DNS domain for the cluster
                 type: string
+              cloudProvider:
+                default: aws
+                description: CloudProvider specifies the cloud provider (currently
+                  only AWS is supported)
+                enum:
+                - aws
+                type: string
               clusterName:
                 description: ClusterName is the name of the OpenShift cluster to provision
                 maxLength: 63
@@ -74,11 +81,12 @@ spec:
                 type: string
               clusterSize:
                 description: ClusterSize defines the cluster configuration size (small,
-                  medium, large)
+                  medium, large, xl)
                 enum:
                 - small
                 - medium
                 - large
+                - xl
                 type: string
               companyName:
                 description: CompanyName is the company/organization name
@@ -133,7 +141,14 @@ spec:
                   reference
                 type: string
               region:
-                description: Region specifies the AWS region for cluster deployment
+                description: |-
+                  Region specifies the region for cluster deployment (e.g., na1, na2, na3, apac, emea)
+                  This will be mapped to the actual cloud provider region
+                type: string
+              requestType:
+                description: |-
+                  RequestType is the type of request from the database (ocpv, engineering, general, rhoai, nvidia)
+                  This determines the EC2 instance types to use
                 type: string
               requestedBy:
                 description: RequestedBy is the username/email of the person requesting
@@ -164,6 +179,7 @@ spec:
                 type: object
             required:
             - baseDomain
+            - cloudProvider
             - clusterName
             - clusterSize
             - environment

@@ -17,11 +17,15 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -40,6 +44,7 @@ import (
 
 	oplv1alpha1 "github.com/yashoza19/opl-cluster-operator/api/v1alpha1"
 	"github.com/yashoza19/opl-cluster-operator/internal/controller"
+	"github.com/yashoza19/opl-cluster-operator/internal/database"
 	"github.com/yashoza19/opl-cluster-operator/internal/git"
 	"github.com/yashoza19/opl-cluster-operator/internal/templates"
 	// +kubebuilder:scaffold:imports
@@ -264,6 +269,81 @@ func main() {
 	// Initialize template generator
 	templateGen := templates.NewGenerator()
 
+	// Initialize Database Client (optional - only if DB_HOST is set)
+	dbHost := os.Getenv("DB_HOST")
+	var dbClient *database.Client
+	var dbSyncReconciler *controller.DatabaseSyncReconciler
+
+	if dbHost != "" {
+		setupLog.Info("Initializing database client", "host", dbHost)
+
+		dbConfig := database.Config{
+			Host:            dbHost,
+			Port:            getIntEnv("DB_PORT", 5432),
+			Database:        getEnvOrDefault("DB_NAME", "opl_labs"),
+			Username:        os.Getenv("DB_USERNAME"),
+			Password:        os.Getenv("DB_PASSWORD"),
+			SSLMode:         getEnvOrDefault("DB_SSL_MODE", "require"),
+			MaxConns:        getIntEnv("DB_MAX_CONNS", 10),
+			MinConns:        getIntEnv("DB_MIN_CONNS", 2),
+			ConnMaxLifetime: 1 * time.Hour,
+			ConnMaxIdleTime: 10 * time.Minute,
+		}
+
+		var err error
+		dbClient, err = database.NewClient(dbConfig)
+		if err != nil {
+			setupLog.Error(err, "unable to create database client")
+			os.Exit(1)
+		}
+
+		// Initialize with retry
+		if err := dbClient.InitializeWithRetry(context.Background(), 5); err != nil {
+			setupLog.Error(err, "unable to initialize database connection")
+			os.Exit(1)
+		}
+
+		setupLog.Info("Database client initialized successfully")
+
+		// Add database health check
+		if err := mgr.AddHealthzCheck("database", func(req *http.Request) error {
+			ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)
+			defer cancel()
+			return dbClient.Ping(ctx)
+		}); err != nil {
+			setupLog.Error(err, "unable to add database health check")
+			os.Exit(1)
+		}
+
+		// Initialize Database Sync Controller
+		dbSyncReconciler = &controller.DatabaseSyncReconciler{
+			Client:   mgr.GetClient(),
+			DBClient: dbClient,
+			Config: controller.DatabaseSyncConfig{
+				SyncNamespace:   getEnvOrDefault("SYNC_NAMESPACE", "default"),
+				BaseDomain:      getEnvOrDefault("BASE_DOMAIN", "openshiftpartnerlabs.com"),
+				PollingInterval: getDurationEnv("SYNC_POLLING_INTERVAL", 30*time.Second),
+				BatchSize:       getIntEnv("SYNC_BATCH_SIZE", 100),
+			},
+		}
+
+		// Add polling goroutine
+		if err := mgr.Add(dbSyncReconciler); err != nil {
+			setupLog.Error(err, "unable to add database sync controller to manager")
+			os.Exit(1)
+		}
+
+		// Setup watch for K8s → DB sync
+		if err := dbSyncReconciler.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to setup database sync controller with manager")
+			os.Exit(1)
+		}
+
+		setupLog.Info("Database sync controller initialized successfully")
+	} else {
+		setupLog.Info("Database sync disabled (DB_HOST not set)")
+	}
+
 	// Set up ClusterRequest controller with Git client and template generator
 	if err := (&controller.ClusterRequestReconciler{
 		Client:      mgr.GetClient(),
@@ -306,4 +386,34 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// Helper functions for environment variable parsing
+
+// getEnvOrDefault returns the environment variable value or a default value
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// getIntEnv returns the environment variable as an integer or a default value
+func getIntEnv(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if i, err := strconv.Atoi(value); err == nil {
+			return i
+		}
+	}
+	return defaultValue
+}
+
+// getDurationEnv returns the environment variable as a duration or a default value
+func getDurationEnv(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if d, err := time.ParseDuration(value); err == nil {
+			return d
+		}
+	}
+	return defaultValue
 }
