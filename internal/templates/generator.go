@@ -93,7 +93,7 @@ patches:
        value: {{.Region}}
      - op: replace
        path: /spec/provisioning/imageSetRef/name
-       value: {{.OpenshiftVersion}}
+       value: {{.ImageSetRef}}
      - op: replace
        path: /spec/provisioning/installConfigSecretRef/name
        value: {{.ClusterName}}-install-config

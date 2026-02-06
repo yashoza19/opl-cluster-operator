@@ -1,8 +1,10 @@
 resources:
 - manager.yaml
+- database-sync-config.yaml
+# database-sync-secret.yaml not needed - using existing partnerlabs-datastore-pguser-labrat secret
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 images:
 - name: controller
   newName: quay.io/yoza/opl-cluster-operator
-  newTag: v0.1.3
+  newTag: v0.2.3

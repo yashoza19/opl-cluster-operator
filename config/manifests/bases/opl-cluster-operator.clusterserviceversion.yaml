@@ -6,7 +6,7 @@ metadata:
     capabilities: Basic Install
     operators.operatorframework.io/builder: operator-sdk-v1.38.0
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
-  name: opl-cluster-operator.v0.1.3
+  name: opl-cluster-operator.v0.2.3
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -49,4 +49,4 @@ spec:
   maturity: alpha
   provider:
     name: OpenShift Partner Labs
-  version: 0.1.3
+  version: 0.2.3

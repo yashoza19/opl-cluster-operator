@@ -1,7 +1,7 @@
 package mappers
 
 import (
-	"fmt"
+	"log"
 
 	oplv1alpha1 "github.com/yashoza19/opl-cluster-operator/api/v1alpha1"
 )
@@ -12,8 +12,10 @@ type ClusterConfig struct {
 	Environment              string
 	CloudProvider            string
 	Region                   string
+	DatabaseRegion           string // Original database region (na1, na2, etc.)
 	BaseDomain               string
-	OpenshiftVersion         string
+	OpenshiftVersion         string // Semantic version (e.g., "4.20.10")
+	ImageSetRef              string // ClusterImageSet reference (e.g., "img4.20.10-x86-64-appsub")
 	ControlPlaneInstanceType string
 	ControlPlaneReplicas     int
 	WorkerInstanceType       string
@@ -26,79 +28,79 @@ type ClusterConfig struct {
 	RequestedBy              string
 }
 
-// ClusterSizeConfig defines instance types and replicas for different cluster sizes
-type ClusterSizeConfig struct {
-	ControlPlaneType     string
-	ControlPlaneReplicas int
-	WorkerType           string
-	WorkerReplicas       int
-}
-
-var clusterSizeMap = map[string]ClusterSizeConfig{
-	"small": {
-		ControlPlaneType:     "m5.xlarge",
-		ControlPlaneReplicas: 3,
-		WorkerType:           "m5.2xlarge",
-		WorkerReplicas:       2,
-	},
-	"medium": {
-		ControlPlaneType:     "m5.xlarge",
-		ControlPlaneReplicas: 3,
-		WorkerType:           "m5.2xlarge",
-		WorkerReplicas:       3,
-	},
-	"large": {
-		ControlPlaneType:     "m5.2xlarge",
-		ControlPlaneReplicas: 3,
-		WorkerType:           "m5.4xlarge",
-		WorkerReplicas:       6,
-	},
-}
-
 // MapClusterRequest converts a ClusterRequest CR to a ClusterConfig
 func MapClusterRequest(cr *oplv1alpha1.ClusterRequest) ClusterConfig {
-	// Get size configuration
-	sizeConfig, ok := clusterSizeMap[cr.Spec.ClusterSize]
+	// Map database region to AWS region
+	databaseRegion := cr.Spec.Region
+	awsRegion := MapRegionToAWS(databaseRegion)
+
+	log.Printf("Mapping region: database=%s -> aws=%s", databaseRegion, awsRegion)
+
+	// Map OpenShift version to ClusterImageSet reference
+	imageSetRef, semanticVersion := MapVersionToImageSet(cr.Spec.OpenshiftVersion)
+	log.Printf("Mapping version: database=%s -> imageSetRef=%s, semanticVersion=%s",
+		cr.Spec.OpenshiftVersion, imageSetRef, semanticVersion)
+
+	// Get instance types and replica counts from cluster size (base configuration)
+	sizeConfig, ok := GetClusterSizeConfig(cr.Spec.ClusterSize)
 	if !ok {
 		// Default to medium if size not found
-		sizeConfig = clusterSizeMap["medium"]
+		sizeConfig, _ = GetClusterSizeConfig("medium")
+		log.Printf("Warning: Unknown cluster size '%s', defaulting to medium", cr.Spec.ClusterSize)
 	}
 
-	// Use explicit control plane config if provided, otherwise use size defaults
 	controlPlaneType := sizeConfig.ControlPlaneType
 	controlPlaneReplicas := sizeConfig.ControlPlaneReplicas
+	workerType := sizeConfig.WorkerType
+	workerReplicas := sizeConfig.WorkerReplicas
+
+	log.Printf("Cluster size selection: size=%s, controlPlane=%s, worker=%s, controlPlaneReplicas=%d, workerReplicas=%d",
+		cr.Spec.ClusterSize, controlPlaneType, workerType, controlPlaneReplicas, workerReplicas)
+
+	// Check for request type override (only for special workloads like OCPV, GPU, etc.)
+	if cr.Spec.RequestType != "" {
+		if override, ok := GetRequestTypeInstanceOverride(cr.Spec.RequestType); ok {
+			log.Printf("Applying request type override: requestType=%s, controlPlane=%s -> %s, worker=%s -> %s",
+				cr.Spec.RequestType, controlPlaneType, override.ControlPlaneType, workerType, override.WorkerType)
+			controlPlaneType = override.ControlPlaneType
+			workerType = override.WorkerType
+		}
+	}
+
+	// Use explicit control plane config if provided (highest priority)
 	if cr.Spec.ControlPlane != nil {
 		if cr.Spec.ControlPlane.InstanceType != "" {
+			log.Printf("Overriding control plane instance type from spec: %s -> %s",
+				controlPlaneType, cr.Spec.ControlPlane.InstanceType)
 			controlPlaneType = cr.Spec.ControlPlane.InstanceType
 		}
 		if cr.Spec.ControlPlane.Replicas > 0 {
+			log.Printf("Overriding control plane replicas from spec: %d -> %d",
+				controlPlaneReplicas, cr.Spec.ControlPlane.Replicas)
 			controlPlaneReplicas = cr.Spec.ControlPlane.Replicas
 		}
 	}
 
-	// Use explicit worker config if provided, otherwise use size defaults
-	workerType := sizeConfig.WorkerType
-	workerReplicas := sizeConfig.WorkerReplicas
+	// Use explicit worker config if provided (highest priority)
 	var workerZones []string
 	if cr.Spec.Workers != nil {
 		if cr.Spec.Workers.InstanceType != "" {
+			log.Printf("Overriding worker instance type from spec: %s -> %s",
+				workerType, cr.Spec.Workers.InstanceType)
 			workerType = cr.Spec.Workers.InstanceType
 		}
 		// Worker replicas can be 0 (valid for clusters without workers)
 		// Always use the explicit value when Workers config is provided
+		log.Printf("Using worker replicas from spec: %d", cr.Spec.Workers.Replicas)
 		workerReplicas = cr.Spec.Workers.Replicas
 		if len(cr.Spec.Workers.Zones) > 0 {
 			workerZones = cr.Spec.Workers.Zones
 		}
 	}
 
-	// Default zones if not specified
+	// Default zones if not specified - use AWS availability zones
 	if len(workerZones) == 0 {
-		workerZones = []string{
-			fmt.Sprintf("%sa", cr.Spec.Region),
-			fmt.Sprintf("%sb", cr.Spec.Region),
-			fmt.Sprintf("%sc", cr.Spec.Region),
-		}
+		workerZones = GetAWSAvailabilityZones(awsRegion)
 	}
 
 	// Networking defaults
@@ -121,9 +123,11 @@ func MapClusterRequest(cr *oplv1alpha1.ClusterRequest) ClusterConfig {
 		ClusterName:              cr.Spec.ClusterName,
 		Environment:              cr.Spec.Environment,
 		CloudProvider:            "aws", // Currently only AWS is supported
-		Region:                   cr.Spec.Region,
+		Region:                   awsRegion,
+		DatabaseRegion:           databaseRegion,
 		BaseDomain:               cr.Spec.BaseDomain,
-		OpenshiftVersion:         cr.Spec.OpenshiftVersion,
+		OpenshiftVersion:         semanticVersion,
+		ImageSetRef:              imageSetRef,
 		ControlPlaneInstanceType: controlPlaneType,
 		ControlPlaneReplicas:     controlPlaneReplicas,
 		WorkerInstanceType:       workerType,
